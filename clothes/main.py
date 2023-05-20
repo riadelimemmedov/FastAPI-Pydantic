@@ -12,8 +12,12 @@ from sqlalchemy import select
 from decouple import config
 from email_validator import validate_email as validate_user_email, EmailNotValidError
 
+from passlib.context import CryptContext
+
 # ?Pyhon modules and Functions
 import enum
+from datetime import datetime
+from typing import Optional
 
 
 # Postgress Settings
@@ -104,24 +108,32 @@ clothes = sqlalchemy.Table(
 )
 
 
-# Create FastApi Object and Define Api Endpoint
+# Create FastApi Object,Passlib and Define Api Endpoint
 app = FastAPI()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 ########################################################################################################################################################
 
 
-# ? BaseUser
-class BaseUser(BaseModel):
-    email: str
-    full_name: str
+# EmailField
+class EmailField(str):
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate_email
 
-    @validator("email")
+    @classmethod
     def validate_email(cls, email):
         try:
             validate_user_email(email)
             return email
         except EmailNotValidError:
             raise ValueError("Email is not valid")
+
+
+# BaseUser
+class BaseUser(BaseModel):
+    email: EmailField
+    full_name: Optional[str]
 
     @validator("full_name")
     def validate_full_name(cls, full_name):
@@ -134,7 +146,14 @@ class BaseUser(BaseModel):
 
 # ?UserSignIn
 class UserSignIn(BaseUser):
-    password: SecretStr
+    password: str
+
+
+# ?UserSignOut
+class UserSignOut(BaseUser):
+    phone: Optional[str]
+    created_at: datetime
+    last_modified_at: datetime
 
 
 ##############################################################################################################################################################
@@ -157,11 +176,19 @@ async def shutdown():
 
 
 #!create_user
-@app.post("/register/user/")
+@app.post("/register/user/", response_model=UserSignOut)
 async def create_user(user: UserSignIn):
     user_values = user.dict()
-    user_values["password"] = user.password.get_secret_value()
+    # user_values["password"] = user.password.get_secret_value()
+    # Or
+    user_values["password"] = pwd_context.hash(user.password)
 
     qs = users.insert().values(**user_values)
-    created_user = await database.execute(qs)
-    return {"created_user": created_user}
+    created_user_id = await database.execute(qs)
+
+    created_user = await database.fetch_one(
+        users.select().where(users.c.id == created_user_id)
+    )
+    return created_user
+
+    # return {"created_user_id": created_user_id}
