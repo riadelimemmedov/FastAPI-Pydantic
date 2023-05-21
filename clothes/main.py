@@ -1,13 +1,15 @@
 #
 
 # ?FastApi
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, SecretStr, validator
 
 
 # ?Third Party packages for FastApi
 import databases  # Databases gives you simple asyncio support for a range of databases.
 import sqlalchemy  # A powerful and popular Object-Relational Mapping (ORM) library that supports multiple database backends, including PostgreSQL, MySQL, SQLite, and more.
+import jwt
 from sqlalchemy import select
 from decouple import config
 from email_validator import validate_email as validate_user_email, EmailNotValidError
@@ -16,7 +18,7 @@ from passlib.context import CryptContext
 
 # ?Pyhon modules and Functions
 import enum
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 
@@ -112,6 +114,42 @@ clothes = sqlalchemy.Table(
 app = FastAPI()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+
+# CustomHTTPBearer
+class CustomHTTPBearer(HTTPBearer):
+    async def __call__(
+        self, request: Request
+    ) -> Optional[HTTPAuthorizationCredentials]:
+        res = await super().__call__(request)
+
+        try:
+            payload = jwt.decode(
+                res.credentials, config("JWT_SECRET"), algorithms=["HS256"]
+            )
+            user = await database.fetch_one(
+                users.select().where(users.c.id == payload["sub"])
+            )
+            request.state.user = user
+            print("Payload value is ", payload)
+            return payload
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(401, "Token is expired")
+        except jwt.InvalidTokenError:
+            raise HTTPException(401, "Invalid token")
+
+
+oauth2_schema = CustomHTTPBearer()
+
+
+# create_access_token
+def create_access_token(user):
+    try:
+        payload = {"sub": user["id"], "exp": datetime.utcnow() + timedelta(minutes=60)}
+        return jwt.encode(payload, config("JWT_SECRET"), algorithm="HS256")
+    except Exception as ex:
+        raise ex
+
+
 ########################################################################################################################################################
 
 
@@ -175,8 +213,16 @@ async def shutdown():
     await database.disconnect()
 
 
+@app.get("/clothes/", dependencies=[Depends(oauth2_schema)])
+async def get_all_clothes(request: Request):
+    user = request.state.user
+    print("Current user Is ", user["full_name"])
+    return await database.fetch_all(clothes.select())
+
+
 #!create_user
-@app.post("/register/user/", response_model=UserSignOut)
+# response_model=UserSignOut => If you want to return user information response back to user use this class,if you don't want,rid this code block
+@app.post("/register/user/")
 async def create_user(user: UserSignIn):
     user_values = user.dict()
     # user_values["password"] = user.password.get_secret_value()
@@ -189,6 +235,7 @@ async def create_user(user: UserSignIn):
     created_user = await database.fetch_one(
         users.select().where(users.c.id == created_user_id)
     )
-    return created_user
+    token = create_access_token(created_user)
+    return {"token": token}
 
     # return {"created_user_id": created_user_id}
