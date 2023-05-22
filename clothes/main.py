@@ -85,6 +85,13 @@ class SizeEnum(enum.Enum):
     xxl = "xxl"
 
 
+# UserRole
+class UserRole(enum.Enum):
+    super_admin = "Super Admin"
+    admin = "Admin"
+    user = "User"
+
+
 # *Clothes
 clothes = sqlalchemy.Table(
     "clothes",
@@ -106,6 +113,12 @@ clothes = sqlalchemy.Table(
         nullable=False,
         server_default=sqlalchemy.func.now(),
         onupdate=sqlalchemy.func.now(),
+    ),
+    sqlalchemy.Column(
+        "user_role",
+        sqlalchemy.Enum(UserRole),
+        nullable=False,
+        server_default=UserRole.user.name,
     ),
 )
 
@@ -139,6 +152,12 @@ class CustomHTTPBearer(HTTPBearer):
 
 
 oauth2_schema = CustomHTTPBearer()
+
+
+def is_admin(request: Request):
+    user = request.state.user
+    if not user or user["role"] not in (UserRole.super_admin, UserRole.admin):
+        raise HTTPException(403, "You do not have permission for this resource")
 
 
 # create_access_token
@@ -194,6 +213,26 @@ class UserSignOut(BaseUser):
     last_modified_at: datetime
 
 
+# ClothesBase
+class ClothesBase(BaseModel):
+    name: str
+    color: str
+    size: SizeEnum
+    color: ColorEnum
+
+
+# ClothesIn
+class ClothesIn(ClothesBase):
+    pass
+
+
+# ClothesOut
+class ClothesOut(ClothesBase):
+    id: int
+    created_at: datetime
+    last_modified_at: datetime
+
+
 ##############################################################################################################################################################
 
 
@@ -213,29 +252,57 @@ async def shutdown():
     await database.disconnect()
 
 
-@app.get("/clothes/", dependencies=[Depends(oauth2_schema)])
+#!get_all_clothes
+@app.get("/clothes/", dependencies=[Depends(oauth2_schema)], status_code=200)
 async def get_all_clothes(request: Request):
     user = request.state.user
     print("Current user Is ", user["full_name"])
     return await database.fetch_all(clothes.select())
 
 
+#!create_clothes
+@app.post(
+    "/clothes/",
+    response_model=ClothesOut,
+    dependencies=[Depends(oauth2_schema)],  # Depends(is_admin)
+    status_code=201,
+)
+async def create_clothes(clothes_data: ClothesIn):
+    created_clothes = await database.execute(
+        clothes.insert().values(**clothes_data.dict())
+    )
+    return await database.fetch_one(
+        clothes.select().where(clothes.c.id == created_clothes)
+    )
+
+
 #!create_user
 # response_model=UserSignOut => If you want to return user information response back to user use this class,if you don't want,rid this code block
-@app.post("/register/user/")
+@app.post("/register/user/", status_code=201)
 async def create_user(user: UserSignIn):
     user_values = user.dict()
-    # user_values["password"] = user.password.get_secret_value()
-    # Or
-    user_values["password"] = pwd_context.hash(user.password)
 
-    qs = users.insert().values(**user_values)
-    created_user_id = await database.execute(qs)
-
-    created_user = await database.fetch_one(
-        users.select().where(users.c.id == created_user_id)
+    existing_user = await database.fetch_one(
+        users.select().where(users.c.email == user_values["email"])
     )
-    token = create_access_token(created_user)
+
+    token = None
+    if existing_user:
+        token = create_access_token(existing_user)
+        print("This token for existing user ", token)
+    else:
+        # user_values["password"] = user.password.get_secret_value()
+        # Or
+        user_values["password"] = pwd_context.hash(user.password)
+
+        qs = users.insert().values(**user_values)
+        created_user_id = await database.execute(qs)
+
+        created_user = await database.fetch_one(
+            users.select().where(users.c.id == created_user_id)
+        )
+        token = create_access_token(created_user)
+        print("This token for new created user ", token)
     return {"token": token}
 
     # return {"created_user_id": created_user_id}
